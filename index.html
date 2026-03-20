@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drone Interceptor Simulation</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e0e0e0;font-family:system-ui,sans-serif;padding:1rem}
+h1{font-size:18px;font-weight:500;margin-bottom:12px;color:#fff;letter-spacing:0.02em}
+#canvas{display:block;width:100%;max-width:900px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:#0a0e1a}
+#hud{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px;max-width:900px}
+.stat{background:rgba(255,255,255,0.05);border-radius:8px;padding:10px 12px;border:1px solid rgba(255,255,255,0.08)}
+.stat-label{font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:2px}
+.stat-val{font-size:20px;font-weight:500;color:#fff}
+#log{margin-top:8px;font-size:12px;color:rgba(255,255,255,0.45);height:36px;overflow:hidden;line-height:1.5;max-width:900px}
+#controls{display:flex;gap:12px;margin-top:10px;align-items:center;flex-wrap:wrap;max-width:900px}
+.ctrl-group{display:flex;align-items:center;gap:6px;font-size:13px;color:rgba(255,255,255,0.55)}
+.ctrl-group input[type=range]{width:90px;accent-color:#3ca0ff}
+.ctrl-group span{min-width:26px;font-weight:500;color:#fff}
+button{font-size:13px;padding:6px 16px;border-radius:8px;border:1px solid rgba(255,255,255,0.2);background:transparent;color:#fff;cursor:pointer;transition:background 0.15s}
+button:hover{background:rgba(255,255,255,0.08)}
+.legend{display:flex;gap:18px;margin-top:8px;max-width:900px;font-size:12px;color:rgba(255,255,255,0.45)}
+.legend-item{display:flex;align-items:center;gap:5px}
+.dot{width:10px;height:10px;border-radius:50%}
+</style>
+</head>
+<body>
+<h1>Drone Interceptor Simulation</h1>
+<canvas id="canvas" width="900" height="500"></canvas>
+<div id="hud">
+  <div class="stat"><div class="stat-label">Wave</div><div class="stat-val" id="s-wave">1</div></div>
+  <div class="stat"><div class="stat-label">Drones active</div><div class="stat-val" id="s-drones">0</div></div>
+  <div class="stat"><div class="stat-label">Neutralized</div><div class="stat-val" id="s-neu">0</div></div>
+  <div class="stat"><div class="stat-label">Reached target</div><div class="stat-val" id="s-hit">0</div></div>
+</div>
+<div id="log">Initializing simulation...</div>
+<div id="controls">
+  <div class="ctrl-group"><label>Drone speed</label><input type="range" id="c-ds" min="0.5" max="4" step="0.1" value="1.5"><span id="c-ds-v">1.5</span></div>
+  <div class="ctrl-group"><label>Missile speed</label><input type="range" id="c-ms" min="1" max="6" step="0.1" value="2.5"><span id="c-ms-v">2.5</span></div>
+  <div class="ctrl-group"><label>Drones/wave</label><input type="range" id="c-dc" min="1" max="10" step="1" value="4"><span id="c-dc-v">4</span></div>
+  <div class="ctrl-group"><label>Hubs</label><input type="range" id="c-hc" min="1" max="16" step="1" value="8"><span id="c-hc-v">8</span></div>
+  <div class="ctrl-group"><label>Hub placement</label>
+    <select id="c-hp" style="background:#1a1f2e;color:#fff;border:1px solid rgba(255,255,255,0.2);border-radius:6px;padding:4px 8px;font-size:13px;cursor:pointer">
+      <option value="border">Border ring</option>
+      <option value="corners">Corners only</option>
+      <option value="circle">Circle</option>
+      <option value="random">Random</option>
+      <option value="clustered">Clustered</option>
+    </select>
+  </div>
+  <button id="btn-pause">Pause</button>
+  <button id="btn-next">Skip Wave</button>
+  <button id="btn-rehub">Rebuild Hubs</button>
+</div>
+<div class="legend">
+  <div class="legend-item"><div class="dot" style="background:#50ff8c"></div> Drone</div>
+  <div class="legend-item"><div class="dot" style="background:#3ca0ff"></div> Interceptor missile</div>
+  <div class="legend-item"><div class="dot" style="background:#ff5050"></div> Target</div>
+  <div class="legend-item"><div class="dot" style="background:rgba(60,150,255,0.5)"></div> Missile hub</div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = 900, H = 500;
+canvas.width = W; canvas.height = H;
+
+let paused = false;
+let waveNum = 1;
+let totalNeu = 0;
+let totalHit = 0;
+let logs = [];
+
+function log(msg){ logs.unshift(msg); if(logs.length>3)logs.pop(); document.getElementById('log').innerHTML=logs.slice(0,2).join('<br>'); }
+
+const TARGET = {x: W/2, y: H/2};
+
+function rnd(a,b){return a+Math.random()*(b-a);}
+function rndInt(a,b){return Math.floor(rnd(a,b+1));}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function norm(dx,dy){const l=Math.hypot(dx,dy)||1;return{x:dx/l,y:dy/l};}
+
+function generateHubs(count, mode){
+  const hubs=[];
+  const pad=45;
+  if(mode==='border'){
+    const perSide=Math.ceil(count/4);
+    const sides=['top','right','bottom','left'];
+    let added=0;
+    for(let s=0;s<4&&added<count;s++){
+      for(let j=0;j<perSide&&added<count;j++){
+        const t=(j+1)/(perSide+1);
+        if(sides[s]==='top') hubs.push({x:pad+(W-pad*2)*t, y:pad});
+        else if(sides[s]==='right') hubs.push({x:W-pad, y:pad+(H-pad*2)*t});
+        else if(sides[s]==='bottom') hubs.push({x:W-pad-(W-pad*2)*t, y:H-pad});
+        else hubs.push({x:pad, y:H-pad-(H-pad*2)*t});
+        added++;
+      }
+    }
+  } else if(mode==='corners'){
+    const cands=[{x:pad,y:pad},{x:W-pad,y:pad},{x:pad,y:H-pad},{x:W-pad,y:H-pad},{x:W/2,y:pad},{x:W/2,y:H-pad},{x:pad,y:H/2},{x:W-pad,y:H/2}];
+    for(let i=0;i<Math.min(count,cands.length);i++) hubs.push(cands[i]);
+    for(let i=cands.length;i<count;i++) hubs.push({x:rnd(pad,W-pad),y:rnd(pad,H-pad)});
+  } else if(mode==='circle'){
+    for(let i=0;i<count;i++){
+      const a=(i/count)*Math.PI*2;
+      const rx=(W/2-pad)*0.88, ry=(H/2-pad)*0.88;
+      hubs.push({x:W/2+Math.cos(a)*rx, y:H/2+Math.sin(a)*ry});
+    }
+  } else if(mode==='random'){
+    for(let i=0;i<count;i++) hubs.push({x:rnd(pad,W-pad),y:rnd(pad,H-pad)});
+  } else if(mode==='clustered'){
+    const numClusters=Math.max(2,Math.floor(count/3));
+    const centers=[];
+    for(let c=0;c<numClusters;c++) centers.push({x:rnd(80,W-80),y:rnd(80,H-80)});
+    for(let i=0;i<count;i++){
+      const c=centers[i%numClusters];
+      hubs.push({x:Math.max(pad,Math.min(W-pad,c.x+rnd(-60,60))),y:Math.max(pad,Math.min(H-pad,c.y+rnd(-60,60)))});
+    }
+  }
+  return hubs;
+}
+
+let activeHubs = generateHubs(8,'border');
+
+let drones=[], missiles=[], particles=[];
+let waveActive=false;
+let waveTimer=0;
+const WAVE_DELAY=180;
+
+function spawnWave(){
+  const droneCount = parseInt(document.getElementById('c-dc').value);
+  const configs=[
+    {spawnFrom:'left', evadeMode:'zigzag'},
+    {spawnFrom:'top', evadeMode:'spiral'},
+    {spawnFrom:'bottom', evadeMode:'circle'},
+    {spawnFrom:'right', evadeMode:'random'},
+    {spawnFrom:'corners', evadeMode:'zigzag'},
+    {spawnFrom:'top', evadeMode:'random'},
+    {spawnFrom:'left', evadeMode:'spiral'},
+    {spawnFrom:'right', evadeMode:'circle'},
+  ];
+  const cfg = configs[(waveNum-1) % configs.length];
+  const missileCount = rndInt(Math.max(1,droneCount-1), droneCount+2);
+  const hubSubset = shuffle(activeHubs.slice()).slice(0, Math.min(missileCount, activeHubs.length));
+
+  drones=[];
+  missiles=[];
+
+  for(let i=0;i<droneCount;i++){
+    let sx,sy;
+    if(cfg.spawnFrom==='left'){sx=rnd(10,80);sy=rnd(60,H-60);}
+    else if(cfg.spawnFrom==='right'){sx=rnd(W-80,W-10);sy=rnd(60,H-60);}
+    else if(cfg.spawnFrom==='top'){sx=rnd(80,W-80);sy=rnd(10,80);}
+    else if(cfg.spawnFrom==='bottom'){sx=rnd(80,W-80);sy=rnd(H-80,H-10);}
+    else{const corners=[{x:30,y:30},{x:W-30,y:30},{x:30,y:H-30},{x:W-30,y:H-30}];const c=corners[i%4];sx=c.x+rnd(-20,20);sy=c.y+rnd(-20,20);}
+    drones.push({x:sx,y:sy,vx:0,vy:0,id:i,evadeMode:cfg.evadeMode,evadeAngle:Math.random()*Math.PI*2,alive:true,t:Math.random()*100,trail:[]});
+  }
+
+  for(let i=0;i<hubSubset.length;i++){
+    const hub=hubSubset[i];
+    const target=drones[i%drones.length];
+    missiles.push({x:hub.x,y:hub.y,hubX:hub.x,hubY:hub.y,vx:0,vy:0,targetId:target.id,alive:true,t:0,trail:[]});
+  }
+
+  waveActive=true;
+  log(`Wave ${waveNum}: ${droneCount} drones (${cfg.evadeMode}) vs ${hubSubset.length} interceptors from ${cfg.spawnFrom}`);
+  document.getElementById('s-wave').textContent=waveNum;
+}
+
+function shuffle(arr){for(let i=arr.length-1;i>0;i--){const j=rndInt(0,i);[arr[i],arr[j]]=[arr[j],arr[i]];}return arr;}
+
+function emitParticles(x,y,color,n){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2;
+    const spd=rnd(1,4);
+    particles.push({x,y,vx:Math.cos(a)*spd,vy:Math.sin(a)*spd,life:1,color});
+  }
+}
+
+function update(){
+  if(paused)return;
+  const DSPD = parseFloat(document.getElementById('c-ds').value);
+  const MSPD = parseFloat(document.getElementById('c-ms').value);
+
+  if(!waveActive){
+    waveTimer++;
+    if(waveTimer>=WAVE_DELAY){waveTimer=0;waveNum++;spawnWave();}
+    return;
+  }
+
+  drones.forEach(d=>{
+    if(!d.alive)return;
+    d.t+=0.04;
+
+    let threatened=null, minMd=999;
+    missiles.forEach(m=>{
+      if(!m.alive)return;
+      if(m.targetId!==d.id)return;
+      const md=dist(m,d);
+      if(md<minMd){minMd=md;threatened=m;}
+    });
+
+    let dx=TARGET.x-d.x, dy=TARGET.y-d.y;
+    let nd=norm(dx,dy);
+    let ex=0,ey=0;
+
+    if(threatened && minMd<120){
+      const evasionStrength=Math.max(0, 1-(minMd/120));
+      if(d.evadeMode==='zigzag'){
+        const ang=Math.atan2(d.y-threatened.y,d.x-threatened.x)+Math.sin(d.t*4)*1.2;
+        ex=Math.cos(ang)*evasionStrength*2.5;
+        ey=Math.sin(ang)*evasionStrength*2.5;
+      } else if(d.evadeMode==='spiral'){
+        d.evadeAngle+=0.12;
+        const perp={x:-(threatened.y-d.y),y:threatened.x-d.x};
+        const pn=norm(perp.x,perp.y);
+        ex=(pn.x*Math.cos(d.evadeAngle))*evasionStrength*2;
+        ey=(pn.y*Math.sin(d.evadeAngle))*evasionStrength*2;
+      } else if(d.evadeMode==='circle'){
+        d.evadeAngle+=0.1;
+        ex=Math.cos(d.evadeAngle+Math.PI/2)*evasionStrength*2;
+        ey=Math.sin(d.evadeAngle+Math.PI/2)*evasionStrength*2;
+      } else {
+        ex=(Math.random()-0.5)*evasionStrength*4;
+        ey=(Math.random()-0.5)*evasionStrength*4;
+      }
+    }
+
+    const fx=nd.x+ex, fy=nd.y+ey;
+    const fn=norm(fx,fy);
+    d.vx=d.vx*0.85+fn.x*DSPD*0.15*2;
+    d.vy=d.vy*0.85+fn.y*DSPD*0.15*2;
+    const spd=Math.hypot(d.vx,d.vy);
+    if(spd>DSPD){d.vx=d.vx/spd*DSPD;d.vy=d.vy/spd*DSPD;}
+
+    d.x+=d.vx; d.y+=d.vy;
+    d.x=Math.max(5,Math.min(W-5,d.x)); d.y=Math.max(5,Math.min(H-5,d.y));
+    d.trail.push({x:d.x,y:d.y}); if(d.trail.length>18)d.trail.shift();
+
+    if(dist(d,TARGET)<18){
+      d.alive=false; totalHit++;
+      document.getElementById('s-hit').textContent=totalHit;
+      emitParticles(d.x,d.y,'#ff4444',20);
+      log(`Drone ${d.id} REACHED TARGET in wave ${waveNum}!`);
+    }
+  });
+
+  missiles.forEach(m=>{
+    if(!m.alive)return;
+    m.t+=0.05;
+    const drone=drones.find(d=>d.id===m.targetId && d.alive);
+    if(!drone){
+      const alive=drones.filter(d=>d.alive);
+      if(alive.length>0){m.targetId=alive[rndInt(0,alive.length-1)].id;}
+      else{m.alive=false;return;}
+    }
+    const td=drones.find(d=>d.id===m.targetId && d.alive);
+    if(!td){m.alive=false;return;}
+
+    const lead=1.2;
+    const px=td.x+td.vx*lead*dist(m,td)/Math.max(MSPD,1);
+    const py=td.y+td.vy*lead*dist(m,td)/Math.max(MSPD,1);
+    const dd=norm(px-m.x,py-m.y);
+    m.vx=m.vx*0.8+dd.x*MSPD*0.2*2;
+    m.vy=m.vy*0.8+dd.y*MSPD*0.2*2;
+    const ms2=Math.hypot(m.vx,m.vy);
+    if(ms2>MSPD){m.vx=m.vx/ms2*MSPD;m.vy=m.vy/ms2*MSPD;}
+    m.x+=m.vx; m.y+=m.vy;
+    m.trail.push({x:m.x,y:m.y}); if(m.trail.length>12)m.trail.shift();
+
+    if(dist(m,td)<10){
+      td.alive=false; m.alive=false; totalNeu++;
+      document.getElementById('s-neu').textContent=totalNeu;
+      emitParticles(td.x,td.y,'#44aaff',16);
+      log(`Interceptor neutralized drone ${td.id} in wave ${waveNum}`);
+    }
+  });
+
+  particles=particles.filter(p=>{
+    p.x+=p.vx; p.y+=p.vy; p.vx*=0.92; p.vy*=0.92; p.life-=0.04;
+    return p.life>0;
+  });
+
+  const aliveDrones=drones.filter(d=>d.alive).length;
+  document.getElementById('s-drones').textContent=aliveDrones;
+
+  if(aliveDrones===0 || drones.every(d=>!d.alive)){
+    waveActive=false;
+    waveTimer=0;
+    log(`Wave ${waveNum} ended. Next wave in ${Math.round(WAVE_DELAY/60)}s...`);
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0a0e1a';
+  ctx.fillRect(0,0,W,H);
+
+  ctx.strokeStyle='rgba(255,255,255,0.03)';
+  ctx.lineWidth=0.5;
+  for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
+  for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+
+  activeHubs.forEach((h,hi)=>{
+    ctx.beginPath();ctx.arc(h.x,h.y,8,0,Math.PI*2);
+    ctx.fillStyle='rgba(60,150,255,0.18)';ctx.fill();
+    ctx.strokeStyle='rgba(60,150,255,0.7)';ctx.lineWidth=1.5;ctx.stroke();
+    ctx.beginPath();ctx.arc(h.x,h.y,14,0,Math.PI*2);
+    ctx.strokeStyle='rgba(60,150,255,0.2)';ctx.lineWidth=1;ctx.stroke();
+    ctx.fillStyle='rgba(60,150,255,0.6)';ctx.font='9px monospace';
+    ctx.fillText(`H${hi+1}`,h.x+10,h.y+4);
+  });
+
+  const pulse=0.7+0.3*Math.sin(Date.now()*0.005);
+  ctx.beginPath();ctx.arc(TARGET.x,TARGET.y,18*pulse,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,60,60,0.12)';ctx.fill();
+  ctx.beginPath();ctx.arc(TARGET.x,TARGET.y,10,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,80,80,0.9)';ctx.fill();
+  ctx.strokeStyle='rgba(255,100,100,0.9)';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(TARGET.x-20,TARGET.y);ctx.lineTo(TARGET.x+20,TARGET.y);
+  ctx.moveTo(TARGET.x,TARGET.y-20);ctx.lineTo(TARGET.x,TARGET.y+20);
+  ctx.strokeStyle='rgba(255,80,80,0.5)';ctx.lineWidth=1;ctx.stroke();
+
+  particles.forEach(p=>{
+    ctx.beginPath();ctx.arc(p.x,p.y,2*p.life,0,Math.PI*2);
+    ctx.fillStyle=p.color+(Math.floor(p.life*255).toString(16).padStart(2,'0'));
+    ctx.fill();
+  });
+
+  drones.forEach(d=>{
+    if(!d.alive)return;
+    if(d.trail.length>1){
+      for(let i=1;i<d.trail.length;i++){
+        const a=(i/d.trail.length)*0.5;
+        ctx.beginPath();ctx.moveTo(d.trail[i-1].x,d.trail[i-1].y);ctx.lineTo(d.trail[i].x,d.trail[i].y);
+        ctx.strokeStyle=`rgba(80,255,140,${a})`;ctx.lineWidth=(i/d.trail.length)*2;ctx.stroke();
+      }
+    }
+    const ang=Math.atan2(d.vy,d.vx);
+    ctx.save();ctx.translate(d.x,d.y);ctx.rotate(ang);
+    ctx.beginPath();ctx.moveTo(8,0);ctx.lineTo(-5,5);ctx.lineTo(-3,0);ctx.lineTo(-5,-5);ctx.closePath();
+    ctx.fillStyle='#50ff8c';ctx.fill();
+    ctx.strokeStyle='rgba(80,255,140,0.6)';ctx.lineWidth=1;ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle='rgba(80,255,140,0.85)';ctx.font='10px monospace';
+    ctx.fillText(`D${d.id}`,d.x+10,d.y-6);
+  });
+
+  missiles.forEach(m=>{
+    if(!m.alive)return;
+    if(m.trail.length>1){
+      for(let i=1;i<m.trail.length;i++){
+        const a=(i/m.trail.length)*0.6;
+        ctx.beginPath();ctx.moveTo(m.trail[i-1].x,m.trail[i-1].y);ctx.lineTo(m.trail[i].x,m.trail[i].y);
+        ctx.strokeStyle=`rgba(60,160,255,${a})`;ctx.lineWidth=(i/m.trail.length)*2;ctx.stroke();
+      }
+    }
+    const ang=Math.atan2(m.vy,m.vx);
+    ctx.save();ctx.translate(m.x,m.y);ctx.rotate(ang);
+    ctx.beginPath();ctx.moveTo(10,0);ctx.lineTo(-4,3);ctx.lineTo(-2,0);ctx.lineTo(-4,-3);ctx.closePath();
+    ctx.fillStyle='#3ca0ff';ctx.fill();
+    ctx.strokeStyle='rgba(60,160,255,0.7)';ctx.lineWidth=1;ctx.stroke();
+    ctx.restore();
+  });
+
+  if(!waveActive && waveTimer>0){
+    const prog=waveTimer/WAVE_DELAY;
+    ctx.fillStyle='rgba(255,255,255,0.08)';
+    ctx.fillRect(W/2-80,H/2-20,160*prog,4);
+    ctx.fillStyle='rgba(255,255,255,0.5)';ctx.font='13px monospace';ctx.textAlign='center';
+    ctx.fillText(`Wave ${waveNum+1} in ${Math.ceil((WAVE_DELAY-waveTimer)/60)}s`,W/2,H/2+20);
+    ctx.textAlign='left';
+  }
+
+  ctx.fillStyle='rgba(255,255,255,0.25)';ctx.font='10px monospace';
+  ctx.fillText('TARGET',TARGET.x+14,TARGET.y+4);
+}
+
+function loop(){update();draw();requestAnimationFrame(loop);}
+
+['c-ds','c-ms','c-dc','c-hc'].forEach(id=>{
+  const el=document.getElementById(id);
+  el.addEventListener('input',()=>{document.getElementById(id+'-v').textContent=parseFloat(el.value).toFixed(id==='c-hc'?0:1);});
+});
+
+function rebuildHubs(){
+  const count=parseInt(document.getElementById('c-hc').value);
+  const mode=document.getElementById('c-hp').value;
+  activeHubs=generateHubs(count,mode);
+  log(`Hubs rebuilt: ${count} hubs in ${mode} formation`);
+}
+
+document.getElementById('c-hc').addEventListener('input', rebuildHubs);
+document.getElementById('c-hp').addEventListener('change', rebuildHubs);
+document.getElementById('btn-rehub').addEventListener('click', rebuildHubs);
+
+document.getElementById('btn-pause').addEventListener('click',function(){
+  paused=!paused;this.textContent=paused?'Resume':'Pause';
+});
+document.getElementById('btn-next').addEventListener('click',()=>{
+  drones.forEach(d=>d.alive=false);
+  missiles.forEach(m=>m.alive=false);
+  waveActive=false;waveTimer=WAVE_DELAY-1;
+});
+
+spawnWave();
+loop();
+</script>
+</body>
+</html>
